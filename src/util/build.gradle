@@ -1,0 +1,25 @@
+apply plugin: 'com.android.library'
+
+android {
+    compileSdkVersion 26
+    defaultConfig {
+        //applicationId 'net.kiwitree.android_ndk_rutabagas.util'
+        minSdkVersion 26
+        targetSdkVersion 26
+        versionCode 1
+        versionName "1.0"
+    }
+    sourceSets {
+        // Android's Gradle plugin expects a deeply nested file layout.
+        // Override it with a flat layout.
+        main {
+            //manifest.srcFile 'AndroidManifest.xml'
+            jni.srcDirs = ['.']
+        }
+    }
+    externalNativeBuild {
+        ndkBuild {
+            path "Android.mk"
+        }
+    }
+}

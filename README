@@ -1,0 +1,73 @@
+chadversary's android-ndk-rutabagas
+===================================
+In this demo you will find not gems, but mere rutabagas.
+
+This repo currently contains only one demo, but I have more demos waiting to be
+pushed.
+
+This buggy demo decodes a video file with the AMedia APIs; imports the
+AHardwareBuffer from the decoded video frame into Vulkan using
+VK_ANDROID_external_memory_android_hardware_buffer; creates
+a VkSamplerYcbcrConversion to convert the AHardwareBuffer's YCbCr colorspace
+into RGB; copies the AHardwareBuffer into the VkSurface with a small shader and
+the VkSamplerYcbcrConversion.
+
+Bugs
+----
+- git grep -E 'FIXME|WORKAROUND|FINISHME'
+- The demo attempts to *smoothly* play the video, but instead it presents just
+  a few choppy frames and then unexpectedly stops. Patches welcome.
+- The colorspace conversion from YCbCr to RGB is broken. The video frames are
+  recognizable but rendered in redscale. Maybe it's a bug in the demo, or maybe in the Vulkan
+  driver, or maybe in the system integration between the Vulkan driver and
+  AMedia stack. The onscreen image suggests that the VkSampler incorrectly
+  converts (y, u, v) into (r=y, g=0, b=0, a=1).
+
+Build Dependencies
+------------------
+The Android NDK, of course.
+
+glslc:
+    CMake must be able to find the 'glslc' executable. The easiest way to
+    satisfy CMake is to put 'glslc' in your shell's $PATH.
+
+    To build and install glslc:
+        > git clone -b known-good https://github.com/google/shaderc ~/shaderc
+        > cd ~/shaderc
+        > ./update_shaderc_sources.py
+        > cd src
+        > cmake -G Ninja
+        > ninja
+        > sudo ninja install
+
+
+How to Build and Install
+------------------------
+> pkg='com.example.media_to_vk_ahb'
+> ./gradlew buildDebug
+> adb connect $REMOTE
+> ./gradlew installDebug
+> adb shell pm grant "$pkg" android.permission.READ_EXTERNAL_STORAGE
+
+How to Run
+----------
+> adb push /your/favorite/video.ext /sdcard/Download/
+> adb logcat -c
+> adb shell am start -n "$pkg/android.app.NativeActivity" \
+                     -e mediaSrc /sdcard/Download/video.ext
+> adb logcat -v color
+
+If the activity dies early with a log message like
+    "Vulkan does not have device extension VK_EXT_queue_family_foreign"
+then edit the #ifdef found by `git grep 'WORKAROUND: VK_EXT_queue_family_foreign'`.
+
+The activity accepts the following optional key/value pairs:
+
+    -e useVkExternalFormat (auto|never|always) # default=auto
+        Control if the AHardwareBuffer is imported with
+        VkExternalFormatANDROID. If useVkExternalFormat=never but the
+        AHardwareBuffer requires an external format, then the activity will
+        abort with a diagnostic log message.
+
+    -e useVkValidation (true|false) # default=true
+        Enable the Vulkan validation layers.

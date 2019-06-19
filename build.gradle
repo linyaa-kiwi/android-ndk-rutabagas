@@ -1,0 +1,46 @@
+buildscript {
+    repositories {
+        google()
+        jcenter()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:3.4.1'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        jcenter()
+    }
+}
+
+apply plugin: "com.android.application"
+
+// Android's Gradle plugin expects a deeply nested file layout.
+// Override it with a flat layout.
+android {
+    compileSdkVersion 28
+    defaultConfig {
+        applicationId "com.example.media_to_vk_ahb"
+        minSdkVersion 28
+        targetSdkVersion 28
+        versionCode 1
+        versionName "1.0"
+    }
+    sourceSets {
+        main {
+            manifest.srcFile 'AndroidManifest.xml'
+            jni.srcDirs = ['.']
+            jniLibs.srcDir "$ndkDirectory/sources/third_party/vulkan/src/build-android/jniLibs"
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path 'CMakeLists.txt'
+        }
+    }
+    lintOptions {
+        disable "AllowBackup", "GoogleAppIndexingWarning"
+    }
+}
