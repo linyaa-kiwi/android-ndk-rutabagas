@@ -146,15 +146,6 @@ typedef struct RuAhbCache {
     RuAhb slots[64];
 } RuAhbCache;
 
-typedef struct RuScene {
-    RuDevice *dev _not_owned_;
-    VkRenderPass render_pass;
-    VkShaderModule vert_module;
-    VkShaderModule frag_module;
-    VkPipelineLayout pipeline_layout;
-    VkPipeline pipeline;
-} RuScene;
-
 typedef struct RuSwapchain {
     RuDevice *dev _not_owned_;
     VkSwapchainKHR vk;
@@ -165,6 +156,11 @@ typedef struct RuSwapchain {
     VkResult status; // set by vkQueuePresentKHR
 } RuSwapchain;
 
+// Container for all resources needed to record a frame's command buffer.
+//
+// It owns the resources dependent on the swapchain, such as VkFramebuffer. It
+// merely references the resources independent of the swapchain, such as the
+// RuAhb.
 typedef struct RuFrame {
     bool is_reset;
 
@@ -235,12 +231,18 @@ typedef struct RuRend {
     RuInstance inst;
     RuPhysicalDevice phys_dev;
     RuDevice dev;
-    RuScene scene;
 
     // For simplicity, we use one VkQueue and one VkCommandPool.
     uint32_t queue_fam_index;
     VkQueue queue;
+
     VkCommandPool cmd_pool;
+    VkRenderPass render_pass;
+    VkShaderModule vert_module;
+    VkShaderModule frag_module;
+    VkDescriptorSetLayout desc_set_layout;
+    VkPipelineLayout pipeline_layout;
+    VkPipeline pipeline;
 
     // Lifetime is that of app's ANativeWindow.
     RuSurface *surf;
@@ -1967,347 +1969,6 @@ ru_rend_next_frame(RuRend *rend) {
     return frame;
 }
 
-static void
-ru_scene_init(
-        RuDevice *dev,
-        RuScene *scene)
-{
-    VkRenderPass render_pass;
-    check(vkCreateRenderPass(dev->vk,
-        &(VkRenderPassCreateInfo) {
-            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-            .attachmentCount = 1,
-            .pAttachments = (VkAttachmentDescription[]) {
-                {
-                    .format = ru_present_format.format,
-                    .samples = 1,
-                    // loadOp is irrelevant because we draw the full quad
-                    .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-                    .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                },
-            },
-            .subpassCount = 1,
-            .pSubpasses = (VkSubpassDescription[]) {
-                {
-                    .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    .colorAttachmentCount = 1,
-                    .pColorAttachments = (VkAttachmentReference[]) {
-                        {
-                            .attachment = 0,
-                            .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                        },
-                    },
-                },
-            },
-        },
-        ru_alloc_cb,
-        &render_pass));
-
-    static const uint32_t vert_spirv[] = {
-        #include "quad.vert.spvnum"
-    };
-
-    VkShaderModule vert_module;
-    check(vkCreateShaderModule(dev->vk,
-        &(VkShaderModuleCreateInfo) {
-            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-            .codeSize = sizeof(vert_spirv),
-            .pCode = vert_spirv,
-        },
-        ru_alloc_cb,
-        &vert_module));
-
-    static const uint32_t frag_spirv[] = {
-        #include "quad.frag.spvnum"
-    };
-
-    VkShaderModule frag_module;
-    check(vkCreateShaderModule(dev->vk,
-        &(VkShaderModuleCreateInfo) {
-            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-            .codeSize = sizeof(frag_spirv),
-            .pCode = frag_spirv,
-        },
-        ru_alloc_cb,
-        &frag_module));
-
-    VkDescriptorSetLayout desc_set_layout;
-    check(vkCreateDescriptorSetLayout(dev->vk,
-        &(VkDescriptorSetLayoutCreateInfo) {
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-            .bindingCount = 1,
-            .pBindings = (VkDescriptorSetLayoutBinding[]) {
-                {
-                    .binding = 0,
-                    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-                },
-            },
-        },
-        ru_alloc_cb,
-        &desc_set_layout));
-
-    VkPipelineLayout pipeline_layout;
-    check(vkCreatePipelineLayout(dev->vk,
-        &(VkPipelineLayoutCreateInfo) {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount = 1,
-            .pSetLayouts = (VkDescriptorSetLayout[]) { desc_set_layout },
-            .pushConstantRangeCount = 0,
-        },
-        ru_alloc_cb,
-        &pipeline_layout));
-
-    VkPipeline pipeline;
-    check(vkCreateGraphicsPipelines(dev->vk,
-        (VkPipelineCache) VK_NULL_HANDLE,
-        /*count*/ 1,
-        (VkGraphicsPipelineCreateInfo[]) {
-            {
-                .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-                .stageCount = 2,
-                .pStages = (VkPipelineShaderStageCreateInfo[]) {
-                    {
-                        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                        .stage = VK_SHADER_STAGE_VERTEX_BIT,
-                        .module = vert_module,
-                        .pName = "main",
-                    },
-                    {
-                        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-                        .module = frag_module,
-                        .pName = "main",
-                    },
-                },
-                .pVertexInputState = &(VkPipelineVertexInputStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-                    .vertexBindingDescriptionCount = 0,
-                },
-                .pInputAssemblyState = &(VkPipelineInputAssemblyStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-                    .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
-                    .primitiveRestartEnable = false,
-                },
-                .pViewportState = &(VkPipelineViewportStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-                    .viewportCount = 1,
-                    .pViewports = NULL, // dynamic
-                    .scissorCount = 1,
-                    .pScissors = NULL, // dynamic
-                },
-                .pRasterizationState = &(VkPipelineRasterizationStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-                    .depthClampEnable = false,
-                    .rasterizerDiscardEnable = false,
-                    .polygonMode = VK_POLYGON_MODE_FILL,
-                    .cullMode = VK_CULL_MODE_NONE,
-                    .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-                    .depthBiasEnable = false,
-                    .lineWidth = 1.0,
-                },
-                .pMultisampleState = &(VkPipelineMultisampleStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-                    .rasterizationSamples = 1,
-                },
-                .pColorBlendState = &(VkPipelineColorBlendStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-                    .logicOpEnable = false,
-                    .attachmentCount = 1,
-                    .pAttachments = (VkPipelineColorBlendAttachmentState []) {
-                        {
-                            .blendEnable = false,
-                            .colorWriteMask =
-                                VK_COLOR_COMPONENT_R_BIT |
-                                VK_COLOR_COMPONENT_G_BIT |
-                                VK_COLOR_COMPONENT_B_BIT |
-                                VK_COLOR_COMPONENT_A_BIT,
-                        },
-                    },
-                },
-                .pDynamicState = &(VkPipelineDynamicStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-                    .flags = 0,
-                    .dynamicStateCount = 2,
-                    .pDynamicStates = (VkDynamicState[]) {
-                        VK_DYNAMIC_STATE_VIEWPORT,
-                        VK_DYNAMIC_STATE_SCISSOR,
-                    },
-                },
-                .layout = pipeline_layout,
-                .renderPass = render_pass,
-                .subpass = 0,
-                .basePipelineHandle = VK_NULL_HANDLE,
-                .basePipelineIndex = 0, // ignored
-            },
-        },
-        ru_alloc_cb,
-        &pipeline));
-
-    *scene = (RuScene) {
-        .dev = dev,
-        .render_pass = render_pass,
-        .vert_module = vert_module,
-        .frag_module = frag_module,
-        .pipeline_layout = pipeline_layout,
-        .pipeline = pipeline,
-    };
-}
-
-static void
-ru_scene_finish(RuScene *scene)
-{
-    RuDevice *dev = scene->dev;
-
-    vkDestroyPipeline(dev->vk, scene->pipeline, ru_alloc_cb);
-    vkDestroyPipelineLayout(dev->vk, scene->pipeline_layout, ru_alloc_cb);
-    vkDestroyShaderModule(dev->vk, scene->vert_module, ru_alloc_cb);
-    vkDestroyShaderModule(dev->vk, scene->frag_module, ru_alloc_cb);
-    vkDestroyRenderPass(dev->vk, scene->render_pass, ru_alloc_cb);
-}
-
-static void
-ru_scene_draw(
-        RuScene *scene,
-        RuFrame *frame,
-        uint32_t queue_fam_index)
-{
-    RuDevice *dev = scene->dev;
-    RuInstance *inst = dev->phys_dev->inst;
-    VkCommandBuffer cmd_buffer = frame->cmd_buffer;
-    VkExtent2D extent = frame->extent;
-
-    vkCmdPipelineBarrier(cmd_buffer,
-        /*srcStageMask*/ VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        /*dstStageMask*/ VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        /*dependencyFlags*/ 0,
-        /*memoryBarriers*/ 0, NULL,
-        /*bufferMemmoryBarriers*/ 0, NULL,
-        /*imageMemmoryBarriers*/ 1, (VkImageMemoryBarrier[]) {
-            {
-                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                .srcAccessMask = 0,
-                .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-                .oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED,
-                .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
-                .dstQueueFamilyIndex = queue_fam_index,
-                .image = frame->rahb->image,
-                .subresourceRange = {
-                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                    .baseMipLevel = 0,
-                    .levelCount = 1,
-                    .baseArrayLayer = 0,
-                    .layerCount = 1,
-                },
-            },
-        });
-
-    vkCmdBeginRenderPass(cmd_buffer,
-        &(VkRenderPassBeginInfo) {
-            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-            .renderPass = scene->render_pass,
-            .framebuffer = frame->framebuffer,
-            .renderArea = (VkRect2D) {
-                .offset = { 0, 0 },
-                .extent = extent,
-            },
-            // We draw the full quad
-            .clearValueCount = 0,
-
-        },
-        VK_SUBPASS_CONTENTS_INLINE);
-
-    vkCmdBindPipeline(cmd_buffer,
-        VK_PIPELINE_BIND_POINT_GRAPHICS,
-        scene->pipeline);
-
-    inst->vkCmdPushDescriptorSetKHR(cmd_buffer,
-        VK_PIPELINE_BIND_POINT_GRAPHICS,
-        scene->pipeline_layout,
-        /*set*/ 0,
-        /*descriptorWriteCount*/ 1,
-        (VkWriteDescriptorSet[]) {
-            {
-                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                // .dstSet = ignored,
-                // .dstBinding = ignored,
-                // .dstArrayElement = ignored,
-                .descriptorCount = 1,
-                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .pImageInfo = (VkDescriptorImageInfo[]) {
-                    {
-                        .sampler = frame->rahb->sampler,
-                        .imageView = frame->rahb->image_view,
-                        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    },
-                },
-            },
-        });
-
-    vkCmdSetViewport(cmd_buffer,
-        /*first*/ 0,
-        /*count*/ 1,
-        (VkViewport[]) {
-            {
-                .x = 0.0,
-                .y = 0.0,
-                .width = extent.width,
-                .height = extent.height,
-                .minDepth = 0.0,
-                .maxDepth = 1.0,
-            },
-        });
-
-    vkCmdSetScissor(cmd_buffer,
-        /*first*/ 0,
-        /*count*/ 1,
-        (VkRect2D[]) {
-            {
-                .offset = { 0.0, 0.0 },
-                .extent = extent,
-            },
-        });
-
-    vkCmdDraw(cmd_buffer,
-        /*vertexCount*/ 4,
-        /*instanceCount*/ 1,
-        /*firstVertex*/ 0,
-        /*firstInstance*/ 0);
-
-    vkCmdEndRenderPass(cmd_buffer);
-
-    vkCmdPipelineBarrier(cmd_buffer,
-        /*srcStageMask*/ VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        /*dstStageMask*/ VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        /*dependencyFlags*/ 0,
-        /*memoryBarriers*/ 0, NULL,
-        /*bufferMemmoryBarriers*/ 0, NULL,
-        /*imageMemmoryBarriers*/ 1, (VkImageMemoryBarrier[]) {
-            {
-                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
-                .dstAccessMask = 0,
-                .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                .srcQueueFamilyIndex = queue_fam_index,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
-                .image = frame->rahb->image,
-                .subresourceRange = {
-                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                    .baseMipLevel = 0,
-                    .levelCount = 1,
-                    .baseArrayLayer = 0,
-                    .layerCount = 1,
-                },
-            },
-        });
-}
-
 static const char *
 ru_rend_event_type_to_str(RuRendEventType t) {
     #define CASE(name) case name: return #name
@@ -2372,7 +2033,6 @@ ru_rend_new_s(struct ru_rend_new_args args) {
     ru_instance_init(args.use_validation, &rend->inst);
     ru_phys_dev_init(&rend->inst, &rend->phys_dev);
     ru_device_init(&rend->phys_dev, &rend->dev);
-    ru_scene_init(&rend->dev, &rend->scene);
 
     rend->queue_fam_index = ru_choose_queue_family(&rend->phys_dev);
 
@@ -2387,6 +2047,176 @@ ru_rend_new_s(struct ru_rend_new_args args) {
         },
         ru_alloc_cb,
         &rend->cmd_pool));
+
+    check(vkCreateRenderPass(rend->dev.vk,
+        &(VkRenderPassCreateInfo) {
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+            .attachmentCount = 1,
+            .pAttachments = (VkAttachmentDescription[]) {
+                {
+                    .format = ru_present_format.format,
+                    .samples = 1,
+                    // loadOp is irrelevant because we draw the full quad
+                    .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                    .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                },
+            },
+            .subpassCount = 1,
+            .pSubpasses = (VkSubpassDescription[]) {
+                {
+                    .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    .colorAttachmentCount = 1,
+                    .pColorAttachments = (VkAttachmentReference[]) {
+                        {
+                            .attachment = 0,
+                            .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        },
+                    },
+                },
+            },
+        },
+        ru_alloc_cb,
+        &rend->render_pass));
+
+    static const uint32_t vert_spirv[] = {
+        #include "quad.vert.spvnum"
+    };
+
+    check(vkCreateShaderModule(rend->dev.vk,
+        &(VkShaderModuleCreateInfo) {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(vert_spirv),
+            .pCode = vert_spirv,
+        },
+        ru_alloc_cb,
+        &rend->vert_module));
+
+    static const uint32_t frag_spirv[] = {
+        #include "quad.frag.spvnum"
+    };
+
+    check(vkCreateShaderModule(rend->dev.vk,
+        &(VkShaderModuleCreateInfo) {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(frag_spirv),
+            .pCode = frag_spirv,
+        },
+        ru_alloc_cb,
+        &rend->frag_module));
+
+    check(vkCreateDescriptorSetLayout(rend->dev.vk,
+        &(VkDescriptorSetLayoutCreateInfo) {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+            .bindingCount = 1,
+            .pBindings = (VkDescriptorSetLayoutBinding[]) {
+                {
+                    .binding = 0,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                },
+            },
+        },
+        ru_alloc_cb,
+        &rend->desc_set_layout));
+
+    check(vkCreatePipelineLayout(rend->dev.vk,
+        &(VkPipelineLayoutCreateInfo) {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = (VkDescriptorSetLayout[]) { rend->desc_set_layout },
+            .pushConstantRangeCount = 0,
+        },
+        ru_alloc_cb,
+        &rend->pipeline_layout));
+
+    check(vkCreateGraphicsPipelines(rend->dev.vk,
+        (VkPipelineCache) VK_NULL_HANDLE,
+        /*count*/ 1,
+        (VkGraphicsPipelineCreateInfo[]) {
+            {
+                .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+                .stageCount = 2,
+                .pStages = (VkPipelineShaderStageCreateInfo[]) {
+                    {
+                        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                        .stage = VK_SHADER_STAGE_VERTEX_BIT,
+                        .module = rend->vert_module,
+                        .pName = "main",
+                    },
+                    {
+                        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+                        .module = rend->frag_module,
+                        .pName = "main",
+                    },
+                },
+                .pVertexInputState = &(VkPipelineVertexInputStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+                    .vertexBindingDescriptionCount = 0,
+                },
+                .pInputAssemblyState = &(VkPipelineInputAssemblyStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                    .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+                    .primitiveRestartEnable = false,
+                },
+                .pViewportState = &(VkPipelineViewportStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+                    .viewportCount = 1,
+                    .pViewports = NULL, // dynamic
+                    .scissorCount = 1,
+                    .pScissors = NULL, // dynamic
+                },
+                .pRasterizationState = &(VkPipelineRasterizationStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                    .depthClampEnable = false,
+                    .rasterizerDiscardEnable = false,
+                    .polygonMode = VK_POLYGON_MODE_FILL,
+                    .cullMode = VK_CULL_MODE_NONE,
+                    .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+                    .depthBiasEnable = false,
+                    .lineWidth = 1.0,
+                },
+                .pMultisampleState = &(VkPipelineMultisampleStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                    .rasterizationSamples = 1,
+                },
+                .pColorBlendState = &(VkPipelineColorBlendStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+                    .logicOpEnable = false,
+                    .attachmentCount = 1,
+                    .pAttachments = (VkPipelineColorBlendAttachmentState []) {
+                        {
+                            .blendEnable = false,
+                            .colorWriteMask =
+                                VK_COLOR_COMPONENT_R_BIT |
+                                VK_COLOR_COMPONENT_G_BIT |
+                                VK_COLOR_COMPONENT_B_BIT |
+                                VK_COLOR_COMPONENT_A_BIT,
+                        },
+                    },
+                },
+                .pDynamicState = &(VkPipelineDynamicStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+                    .flags = 0,
+                    .dynamicStateCount = 2,
+                    .pDynamicStates = (VkDynamicState[]) {
+                        VK_DYNAMIC_STATE_VIEWPORT,
+                        VK_DYNAMIC_STATE_SCISSOR,
+                    },
+                },
+                .layout = rend->pipeline_layout,
+                .renderPass = rend->render_pass,
+                .subpass = 0,
+                .basePipelineHandle = VK_NULL_HANDLE,
+                .basePipelineIndex = 0, // ignored
+            },
+        },
+        ru_alloc_cb,
+        &rend->pipeline));
 
     rend->surf = NULL;
     rend->swapchain = NULL;
@@ -2420,11 +2250,15 @@ ru_rend_free(RuRend *rend) {
     }
 
     ru_ahb_cache_finish(&rend->ahb_cache);
+    vkDestroyPipeline(rend->dev.vk, rend->pipeline, ru_alloc_cb);
+    vkDestroyPipelineLayout(rend->dev.vk, rend->pipeline_layout, ru_alloc_cb);
+    vkDestroyShaderModule(rend->dev.vk, rend->vert_module, ru_alloc_cb);
+    vkDestroyShaderModule(rend->dev.vk, rend->frag_module, ru_alloc_cb);
+    vkDestroyRenderPass(rend->dev.vk, rend->render_pass, ru_alloc_cb);
     vkDestroyCommandPool(rend->dev.vk, rend->cmd_pool, ru_alloc_cb);
     ru_framechain_free(rend->framechain);
     ru_swapchain_free(rend->swapchain);
     ru_surface_free(rend->surf);
-    ru_scene_finish(&rend->scene);
     ru_device_finish(&rend->dev);
     ru_phys_dev_finish(&rend->phys_dev);
     ru_instance_finish(&rend->inst);
@@ -2474,6 +2308,8 @@ ru_rend_present(RuRend *rend) {
     static _Atomic uint64_t seq = 0;
     logd("%s: seq=%"PRIu64, __func__, ++seq);
 
+    RuInstance *inst = &rend->inst;
+
     assert(rend->surf);
     assert(!!rend->framechain == !!rend->swapchain);
 
@@ -2490,7 +2326,7 @@ ru_rend_present(RuRend *rend) {
         rend->swapchain = ru_swapchain_new(&rend->dev, rend->surf,
                 rend->queue_fam_index);
         rend->framechain = ru_framechain_new(rend->swapchain, rend->cmd_pool,
-                rend->scene.render_pass);
+                rend->render_pass);
     }
 
     assert(rend->swapchain);
@@ -2508,7 +2344,131 @@ ru_rend_present(RuRend *rend) {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         }));
 
-    ru_scene_draw(&rend->scene, frame, rend->queue_fam_index);
+    vkCmdPipelineBarrier(frame->cmd_buffer,
+        /*srcStageMask*/ VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        /*dstStageMask*/ VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        /*dependencyFlags*/ 0,
+        /*memoryBarriers*/ 0, NULL,
+        /*bufferMemmoryBarriers*/ 0, NULL,
+        /*imageMemmoryBarriers*/ 1, (VkImageMemoryBarrier[]) {
+            {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .srcAccessMask = 0,
+                .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED,
+                .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+                .dstQueueFamilyIndex = rend->queue_fam_index,
+                .image = frame->rahb->image,
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            },
+        });
+
+    vkCmdBeginRenderPass(frame->cmd_buffer,
+        &(VkRenderPassBeginInfo) {
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass = rend->render_pass,
+            .framebuffer = frame->framebuffer,
+            .renderArea = (VkRect2D) {
+                .offset = { 0, 0 },
+                .extent = frame->extent,
+            },
+            // We draw the full quad
+            .clearValueCount = 0,
+
+        },
+        VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(frame->cmd_buffer,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        rend->pipeline);
+
+    inst->vkCmdPushDescriptorSetKHR(frame->cmd_buffer,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        rend->pipeline_layout,
+        /*set*/ 0,
+        /*descriptorWriteCount*/ 1,
+        (VkWriteDescriptorSet[]) {
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                // .dstSet = ignored,
+                // .dstBinding = ignored,
+                // .dstArrayElement = ignored,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = (VkDescriptorImageInfo[]) {
+                    {
+                        .sampler = frame->rahb->sampler,
+                        .imageView = frame->rahb->image_view,
+                        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    },
+                },
+            },
+        });
+
+    vkCmdSetViewport(frame->cmd_buffer,
+        /*first*/ 0,
+        /*count*/ 1,
+        (VkViewport[]) {
+            {
+                .x = 0.0,
+                .y = 0.0,
+                .width = frame->extent.width,
+                .height = frame->extent.height,
+                .minDepth = 0.0,
+                .maxDepth = 1.0,
+            },
+        });
+
+    vkCmdSetScissor(frame->cmd_buffer,
+        /*first*/ 0,
+        /*count*/ 1,
+        (VkRect2D[]) {
+            {
+                .offset = { 0.0, 0.0 },
+                .extent = frame->extent,
+            },
+        });
+
+    vkCmdDraw(frame->cmd_buffer,
+        /*vertexCount*/ 4,
+        /*instanceCount*/ 1,
+        /*firstVertex*/ 0,
+        /*firstInstance*/ 0);
+
+    vkCmdEndRenderPass(frame->cmd_buffer);
+
+    vkCmdPipelineBarrier(frame->cmd_buffer,
+        /*srcStageMask*/ VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        /*dstStageMask*/ VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        /*dependencyFlags*/ 0,
+        /*memoryBarriers*/ 0, NULL,
+        /*bufferMemmoryBarriers*/ 0, NULL,
+        /*imageMemmoryBarriers*/ 1, (VkImageMemoryBarrier[]) {
+            {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                .dstAccessMask = 0,
+                .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                .srcQueueFamilyIndex = rend->queue_fam_index,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+                .image = frame->rahb->image,
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            },
+        });
 
     check(vkEndCommandBuffer(frame->cmd_buffer));
 
