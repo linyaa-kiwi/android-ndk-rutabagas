@@ -107,6 +107,7 @@ typedef struct RuDevice {
     VkDevice vk;
 } RuDevice;
 
+// Resources for the scene that are specific to each AHB.
 typedef struct RuAhb {
     AHardwareBuffer *ahb;
     VkDeviceMemory mem;
@@ -114,6 +115,13 @@ typedef struct RuAhb {
     VkImageView image_view;
     VkSamplerYcbcrConversionKHR sampler_ycbcr_conv;
     VkSampler sampler;
+
+    // When using VkSamplerYcbcrConversionKHR, the Vulkan spec requires that
+    // the VkDescriptorSetLayoutBinding use use an immutable
+    // combined-image-sampler.
+    VkDescriptorSetLayout desc_set_layout;
+    VkPipelineLayout pipeline_layout;
+    VkPipeline pipeline;
 
     // If non-null, the AImage holds a reference to the AHB.
     AImage *aimage;
@@ -135,13 +143,6 @@ typedef struct RuAImageHeap {
 } RuAImageHeap;
 
 typedef struct RuAhbCache {
-    RuDevice *dev _not_owned_;
-
-    // All child resources use a single queue family.
-    uint32_t queue_fam_index;
-
-    RuRendUseExternalFormat use_ext_format;
-
     // A slot is valid iff RuAhb::ahb is non-null.
     RuAhb slots[64];
 } RuAhbCache;
@@ -231,6 +232,7 @@ typedef struct RuRend {
     RuInstance inst;
     RuPhysicalDevice phys_dev;
     RuDevice dev;
+    RuRendUseExternalFormat use_ext_format;
 
     // For simplicity, we use one VkQueue and one VkCommandPool.
     uint32_t queue_fam_index;
@@ -240,9 +242,6 @@ typedef struct RuRend {
     VkRenderPass render_pass;
     VkShaderModule vert_module;
     VkShaderModule frag_module;
-    VkDescriptorSetLayout desc_set_layout;
-    VkPipelineLayout pipeline_layout;
-    VkPipeline pipeline;
 
     // Lifetime is that of app's ANativeWindow.
     RuSurface *surf;
@@ -1222,14 +1221,13 @@ ru_ahb_choose_image_creation_params(
 
 static void
 ru_ahb_init(
-        RuDevice *dev,
-        uint32_t queue_fam_index,
-        RuRendUseExternalFormat use_ext_format,
+        RuRend *rend,
         AHardwareBuffer *ahb,
         RuAhb *rahb)
 {
-    RuInstance *inst = dev->phys_dev->inst;
-    RuPhysicalDevice *phys_dev = dev->phys_dev;
+    RuInstance *inst = &rend->inst;
+    RuPhysicalDevice *phys_dev = &rend->phys_dev;
+    RuDevice *dev = &rend->dev;
 
     AHardwareBuffer_acquire(ahb);
 
@@ -1282,8 +1280,8 @@ ru_ahb_init(
     VkExternalFormatANDROID ext_format;
     ru_ahb_choose_image_creation_params(
         phys_dev,
-        queue_fam_index,
-        use_ext_format,
+        rend->queue_fam_index,
+        rend->use_ext_format,
         ahb,
         &ahb_desc,
         &ahb_props,
@@ -1446,6 +1444,127 @@ ru_ahb_init(
     check(vkCreateImageView(dev->vk, &image_view_create_info, ru_alloc_cb,
             &image_view));
 
+    // When using VkSamplerYcbcrConversionKHR, the Vulkan spec requires that
+    // the VkDescriptorSetLayoutBinding use use an immutable
+    // combined-image-sampler.
+    VkDescriptorSetLayout desc_set_layout;
+    check(vkCreateDescriptorSetLayout(dev->vk,
+        &(VkDescriptorSetLayoutCreateInfo) {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+            .bindingCount = 1,
+            .pBindings = (VkDescriptorSetLayoutBinding[]) {
+                {
+                    .binding = 0,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                    .pImmutableSamplers = (VkSampler[]) {
+                        sampler,
+                    },
+                },
+            },
+        },
+        ru_alloc_cb,
+        &desc_set_layout));
+
+    VkPipelineLayout pipeline_layout;
+    check(vkCreatePipelineLayout(dev->vk,
+        &(VkPipelineLayoutCreateInfo) {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = (VkDescriptorSetLayout[]) { desc_set_layout },
+            .pushConstantRangeCount = 0,
+        },
+        ru_alloc_cb,
+        &pipeline_layout));
+
+    VkPipeline pipeline;
+    check(vkCreateGraphicsPipelines(dev->vk,
+        (VkPipelineCache) VK_NULL_HANDLE,
+        /*count*/ 1,
+        (VkGraphicsPipelineCreateInfo[]) {
+            {
+                .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+                .stageCount = 2,
+                .pStages = (VkPipelineShaderStageCreateInfo[]) {
+                    {
+                        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                        .stage = VK_SHADER_STAGE_VERTEX_BIT,
+                        .module = rend->vert_module,
+                        .pName = "main",
+                    },
+                    {
+                        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+                        .module = rend->frag_module,
+                        .pName = "main",
+                    },
+                },
+                .pVertexInputState = &(VkPipelineVertexInputStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+                    .vertexBindingDescriptionCount = 0,
+                },
+                .pInputAssemblyState = &(VkPipelineInputAssemblyStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                    .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+                    .primitiveRestartEnable = false,
+                },
+                .pViewportState = &(VkPipelineViewportStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+                    .viewportCount = 1,
+                    .pViewports = NULL, // dynamic
+                    .scissorCount = 1,
+                    .pScissors = NULL, // dynamic
+                },
+                .pRasterizationState = &(VkPipelineRasterizationStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                    .depthClampEnable = false,
+                    .rasterizerDiscardEnable = false,
+                    .polygonMode = VK_POLYGON_MODE_FILL,
+                    .cullMode = VK_CULL_MODE_NONE,
+                    .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+                    .depthBiasEnable = false,
+                    .lineWidth = 1.0,
+                },
+                .pMultisampleState = &(VkPipelineMultisampleStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                    .rasterizationSamples = 1,
+                },
+                .pColorBlendState = &(VkPipelineColorBlendStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+                    .logicOpEnable = false,
+                    .attachmentCount = 1,
+                    .pAttachments = (VkPipelineColorBlendAttachmentState []) {
+                        {
+                            .blendEnable = false,
+                            .colorWriteMask =
+                                VK_COLOR_COMPONENT_R_BIT |
+                                VK_COLOR_COMPONENT_G_BIT |
+                                VK_COLOR_COMPONENT_B_BIT |
+                                VK_COLOR_COMPONENT_A_BIT,
+                        },
+                    },
+                },
+                .pDynamicState = &(VkPipelineDynamicStateCreateInfo) {
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+                    .flags = 0,
+                    .dynamicStateCount = 2,
+                    .pDynamicStates = (VkDynamicState[]) {
+                        VK_DYNAMIC_STATE_VIEWPORT,
+                        VK_DYNAMIC_STATE_SCISSOR,
+                    },
+                },
+                .layout = pipeline_layout,
+                .renderPass = rend->render_pass,
+                .subpass = 0,
+                .basePipelineHandle = VK_NULL_HANDLE,
+                .basePipelineIndex = 0, // ignored
+            },
+        },
+        ru_alloc_cb,
+        &pipeline));
+
      *rahb = (RuAhb) {
         .ahb = ahb,
         .mem = mem,
@@ -1453,6 +1572,9 @@ ru_ahb_init(
         .image_view = image_view,
         .sampler_ycbcr_conv = sampler_ycbcr_conv,
         .sampler = sampler,
+        .desc_set_layout = desc_set_layout,
+        .pipeline_layout = pipeline_layout,
+        .pipeline = pipeline,
         .aimage = NULL,
         .in_aimage_reader = false,
     };
@@ -1467,12 +1589,16 @@ ru_ahb_finish(RuDevice *dev, RuAhb *rahb) {
         AImage_delete(rahb->aimage);
     }
 
+    vkDestroyPipeline(dev->vk, rahb->pipeline, ru_alloc_cb);
+    vkDestroyPipelineLayout(dev->vk, rahb->pipeline_layout, ru_alloc_cb);
+    vkDestroyDescriptorSetLayout(dev->vk, rahb->desc_set_layout, ru_alloc_cb);
     vkDestroySampler(dev->vk, rahb->sampler, ru_alloc_cb);
 
     // FIXME: vkDestroySamplerYcbcrConversion(dev->vk, rahb->sampler_ycbcr_conv, ru_alloc_cb);
     logd("WORKAROUND: Avoid vkDestroySamplerYcbcrConversion; it crashes "
             "libVkLayer_unique_objects.so");
 
+    vkDestroyImageView(dev->vk, rahb->image_view, ru_alloc_cb);
     vkDestroyImage(dev->vk, rahb->image, ru_alloc_cb);
     vkFreeMemory(dev->vk, rahb->mem, ru_alloc_cb);
     AHardwareBuffer_release(rahb->ahb);
@@ -1738,7 +1864,7 @@ ru_framechain_collect(RuDevice *dev, RuFramechain *framechain) {
 }
 
 #define ru_ahb_cache_each_slot(cache, slot) \
-    __ru_ahb_cache_each_slot(UNIQ(cache), (cache), UNIQ(i), slot)
+    __ru_ahb_cache_each_slot(UNIQ(_cache), (cache), UNIQ(i), slot)
 
 #define __ru_ahb_cache_each_slot(uniq_cache, cache, uniq_i, slot) \
     RuAhbCache *uniq_cache = (cache); \
@@ -1747,31 +1873,6 @@ ru_framechain_collect(RuDevice *dev, RuFramechain *framechain) {
          uniq_i < ARRAY_LEN(uniq_cache->slots) \
             && (slot = &uniq_cache->slots[uniq_i], true); \
          ++uniq_i)
-
-static void
-ru_ahb_cache_init(
-        RuDevice *dev,
-        uint32_t queue_fam_index,
-        RuRendUseExternalFormat use_ext_format,
-        RuAhbCache *cache)
-{
-    *cache = (RuAhbCache) {
-        .dev = dev,
-        .queue_fam_index = queue_fam_index,
-        .use_ext_format = use_ext_format,
-    };
-}
-
-static void
-ru_ahb_cache_finish(RuAhbCache *cache) {
-    RuDevice *dev = cache->dev;
-
-    ru_ahb_cache_each_slot(cache, rahb) {
-        if (rahb) {
-            ru_ahb_finish(dev, rahb);
-        }
-    }
-}
 
 static RuAhb * _must_use_result_
 ru_ahb_cache_search(RuAhbCache *cache, AHardwareBuffer *ahb) {
@@ -1785,8 +1886,8 @@ ru_ahb_cache_search(RuAhbCache *cache, AHardwareBuffer *ahb) {
 }
 
 static RuAhb * _must_use_result_
-ru_ahb_cache_import(RuAhbCache *cache, AHardwareBuffer *ahb) {
-    RuDevice *dev = cache->dev;
+ru_rend_import_ahb(RuRend *rend, AHardwareBuffer *ahb) {
+    RuAhbCache *cache = &rend->ahb_cache;
     RuAhb *rahb;
 
     rahb = ru_ahb_cache_search(cache, ahb);
@@ -1798,14 +1899,16 @@ ru_ahb_cache_import(RuAhbCache *cache, AHardwareBuffer *ahb) {
     if (!rahb)
         die("RuAhbCache is full");
 
-    ru_ahb_init(dev, cache->queue_fam_index, cache->use_ext_format, ahb, rahb);
+    ru_ahb_init(rend, ahb, rahb);
 
     return rahb;
 }
 
 static void
-ru_ahb_cache_purge_dead_slots(RuDevice *dev, RuAhbCache *cache) {
-    ru_ahb_cache_each_slot(cache, slot) {
+ru_rend_purge_dead_ahbs(RuRend *rend) {
+    RuDevice *dev = &rend->dev;
+
+    ru_ahb_cache_each_slot(&rend->ahb_cache, slot) {
         if (!slot->ahb) {
             // invalid slot
             continue;
@@ -1962,7 +2065,7 @@ ru_rend_next_frame(RuRend *rend) {
         die("AImage_getHardwareBuffer failed: error=%d", ret);
 
     frame->is_reset = false;
-    frame->rahb = ru_ahb_cache_import(&rend->ahb_cache, ahb);
+    frame->rahb = ru_rend_import_ahb(rend, ahb);
     frame->rahb->aimage = aimage;
     frame->rahb->in_aimage_reader = true;
 
@@ -2033,6 +2136,7 @@ ru_rend_new_s(struct ru_rend_new_args args) {
     ru_instance_init(args.use_validation, &rend->inst);
     ru_phys_dev_init(&rend->inst, &rend->phys_dev);
     ru_device_init(&rend->phys_dev, &rend->dev);
+    rend->use_ext_format = args.use_external_format;
 
     rend->queue_fam_index = ru_choose_queue_family(&rend->phys_dev);
 
@@ -2106,124 +2210,12 @@ ru_rend_new_s(struct ru_rend_new_args args) {
         ru_alloc_cb,
         &rend->frag_module));
 
-    check(vkCreateDescriptorSetLayout(rend->dev.vk,
-        &(VkDescriptorSetLayoutCreateInfo) {
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-            .bindingCount = 1,
-            .pBindings = (VkDescriptorSetLayoutBinding[]) {
-                {
-                    .binding = 0,
-                    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-                },
-            },
-        },
-        ru_alloc_cb,
-        &rend->desc_set_layout));
-
-    check(vkCreatePipelineLayout(rend->dev.vk,
-        &(VkPipelineLayoutCreateInfo) {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount = 1,
-            .pSetLayouts = (VkDescriptorSetLayout[]) { rend->desc_set_layout },
-            .pushConstantRangeCount = 0,
-        },
-        ru_alloc_cb,
-        &rend->pipeline_layout));
-
-    check(vkCreateGraphicsPipelines(rend->dev.vk,
-        (VkPipelineCache) VK_NULL_HANDLE,
-        /*count*/ 1,
-        (VkGraphicsPipelineCreateInfo[]) {
-            {
-                .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-                .stageCount = 2,
-                .pStages = (VkPipelineShaderStageCreateInfo[]) {
-                    {
-                        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                        .stage = VK_SHADER_STAGE_VERTEX_BIT,
-                        .module = rend->vert_module,
-                        .pName = "main",
-                    },
-                    {
-                        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-                        .module = rend->frag_module,
-                        .pName = "main",
-                    },
-                },
-                .pVertexInputState = &(VkPipelineVertexInputStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-                    .vertexBindingDescriptionCount = 0,
-                },
-                .pInputAssemblyState = &(VkPipelineInputAssemblyStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-                    .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
-                    .primitiveRestartEnable = false,
-                },
-                .pViewportState = &(VkPipelineViewportStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-                    .viewportCount = 1,
-                    .pViewports = NULL, // dynamic
-                    .scissorCount = 1,
-                    .pScissors = NULL, // dynamic
-                },
-                .pRasterizationState = &(VkPipelineRasterizationStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-                    .depthClampEnable = false,
-                    .rasterizerDiscardEnable = false,
-                    .polygonMode = VK_POLYGON_MODE_FILL,
-                    .cullMode = VK_CULL_MODE_NONE,
-                    .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-                    .depthBiasEnable = false,
-                    .lineWidth = 1.0,
-                },
-                .pMultisampleState = &(VkPipelineMultisampleStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-                    .rasterizationSamples = 1,
-                },
-                .pColorBlendState = &(VkPipelineColorBlendStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-                    .logicOpEnable = false,
-                    .attachmentCount = 1,
-                    .pAttachments = (VkPipelineColorBlendAttachmentState []) {
-                        {
-                            .blendEnable = false,
-                            .colorWriteMask =
-                                VK_COLOR_COMPONENT_R_BIT |
-                                VK_COLOR_COMPONENT_G_BIT |
-                                VK_COLOR_COMPONENT_B_BIT |
-                                VK_COLOR_COMPONENT_A_BIT,
-                        },
-                    },
-                },
-                .pDynamicState = &(VkPipelineDynamicStateCreateInfo) {
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-                    .flags = 0,
-                    .dynamicStateCount = 2,
-                    .pDynamicStates = (VkDynamicState[]) {
-                        VK_DYNAMIC_STATE_VIEWPORT,
-                        VK_DYNAMIC_STATE_SCISSOR,
-                    },
-                },
-                .layout = rend->pipeline_layout,
-                .renderPass = rend->render_pass,
-                .subpass = 0,
-                .basePipelineHandle = VK_NULL_HANDLE,
-                .basePipelineIndex = 0, // ignored
-            },
-        },
-        ru_alloc_cb,
-        &rend->pipeline));
-
     rend->surf = NULL;
     rend->swapchain = NULL;
     rend->framechain = NULL;
 
-    ru_ahb_cache_init(&rend->dev, rend->queue_fam_index,
-            args.use_external_format, &rend->ahb_cache);
+    zero(rend->ahb_cache);
+
     rend->aimage_heap.aimage_reader = NULL; // invalidate
 
     ru_chan_init(&rend->event_chan, sizeof(RuRendEvent), 8);
@@ -2249,9 +2241,12 @@ ru_rend_free(RuRend *rend) {
         ru_aimage_heap_finish(&rend->aimage_heap);
     }
 
-    ru_ahb_cache_finish(&rend->ahb_cache);
-    vkDestroyPipeline(rend->dev.vk, rend->pipeline, ru_alloc_cb);
-    vkDestroyPipelineLayout(rend->dev.vk, rend->pipeline_layout, ru_alloc_cb);
+    ru_ahb_cache_each_slot(&rend->ahb_cache, rahb) {
+        if (rahb->ahb) {
+            ru_ahb_finish(&rend->dev, rahb);
+        }
+    }
+
     vkDestroyShaderModule(rend->dev.vk, rend->vert_module, ru_alloc_cb);
     vkDestroyShaderModule(rend->dev.vk, rend->frag_module, ru_alloc_cb);
     vkDestroyRenderPass(rend->dev.vk, rend->render_pass, ru_alloc_cb);
@@ -2387,11 +2382,11 @@ ru_rend_present(RuRend *rend) {
 
     vkCmdBindPipeline(frame->cmd_buffer,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
-        rend->pipeline);
+        frame->rahb->pipeline);
 
     inst->vkCmdPushDescriptorSetKHR(frame->cmd_buffer,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
-        rend->pipeline_layout,
+        frame->rahb->pipeline_layout,
         /*set*/ 0,
         /*descriptorWriteCount*/ 1,
         (VkWriteDescriptorSet[]) {
@@ -2571,6 +2566,6 @@ ru_rend_thread(void *_rend) {
             ru_framechain_collect(&rend->dev, rend->framechain);
         }
 
-        ru_ahb_cache_purge_dead_slots(&rend->dev, &rend->ahb_cache);
+        ru_rend_purge_dead_ahbs(rend);
     }
 }
