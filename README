@@ -17,11 +17,6 @@ Bugs
 - git grep -E 'FIXME|WORKAROUND|FINISHME'
 - The demo attempts to *smoothly* play the video, but instead it presents just
   a few choppy frames and then unexpectedly stops. Patches welcome.
-- The colorspace conversion from YCbCr to RGB is broken. The video frames are
-  recognizable but rendered in redscale. Maybe it's a bug in the demo, or maybe in the Vulkan
-  driver, or maybe in the system integration between the Vulkan driver and
-  AMedia stack. The onscreen image suggests that the VkSampler incorrectly
-  converts (y, u, v) into (r=y, g=0, b=0, a=1).
 
 Build Dependencies
 ------------------
