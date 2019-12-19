@@ -57,6 +57,8 @@ typedef struct AMediaCodecOnAsyncNotifyCallback AMediaCodecOnAsyncNotifyCallback
 #include "util/ru_chan.h"
 
 #include "ru_media.h"
+#include <android/asset_manager.h>
+
 
 #define RU_MEDIA_MAX_IMAGE_COUNT 8
 
@@ -93,6 +95,9 @@ typedef struct RuMedia {
     // RuMedia::thread drains the channel and forwards each index to
     // AMediaCodec_queueInputBuffer or AMediaCodec_releaseOutputBuffer.
     RuChan event_chan;
+
+    AAsset *asset;
+
 } RuMedia;
 
 static void
@@ -357,6 +362,87 @@ ru_media_new(const char *src_path) {
     return m;
 }
 
+RuMedia *
+ru_asset_media_new(AAssetManager *asset_mgr, const char *src_path) {
+    int ret;
+
+    let m = new0(RuMedia);
+
+    ru_chan_init(&m->event_chan, sizeof(RuMediaEvent), 64);
+
+    logd("media: open file: %s", src_path);
+    m->asset = AAssetManager_open(asset_mgr, src_path, 0);
+    if(!m->asset) die("media: failed to open media in asset");
+    off_t start, len;
+    int src_fd = AAsset_openFileDescriptor(m->asset, &start, &len);
+    if (src_fd == -1)
+        die("media: failed to open file: %s", src_path);
+
+    if (len == -1)
+        die("media: failed to query size of file");
+
+    m->ex = AMediaExtractor_new();
+    if (!m->ex)
+        abort();
+
+    ret = AMediaExtractor_setDataSourceFd(m->ex, src_fd, start, len);
+    if (ret)
+        die("media: AMediaExtractor_setDataSourceFd failed: error=%d", ret);
+
+    select_track(m->ex, &m->track, &m->format);
+
+    int32_t width, height;
+    if (!AMediaFormat_getInt32(m->format, AMEDIAFORMAT_KEY_WIDTH, &width) ||
+        !AMediaFormat_getInt32(m->format, AMEDIAFORMAT_KEY_HEIGHT, &height)) {
+        die("media: failed to query AMediaFormat width, height");
+    }
+
+    ret = AImageReader_newWithUsage(
+            width, height,
+            AIMAGE_FORMAT_YUV_420_888,
+            AHARDWAREBUFFER_USAGE_CPU_READ_NEVER |
+            AHARDWAREBUFFER_USAGE_CPU_WRITE_NEVER |
+            AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE,
+            RU_MEDIA_MAX_IMAGE_COUNT,
+            &m->image_reader);
+    if (ret)
+        die("media: AImageReader_newWithUsage failed: error=%d", ret);
+
+    ANativeWindow *surface;
+    ret = AImageReader_getWindow(m->image_reader, &surface);
+    if (ret)
+        die("media: AImageReader_getWindow failed: error=%d", ret);
+
+    const char *mime = NULL; // owned by format
+    if (!AMediaFormat_getString(m->format, AMEDIAFORMAT_KEY_MIME, &mime))
+        die("media: track: %u, AMediaFormat_getString(AMEDIAFORMAT_KEY_MIME) failed", m->track);
+
+    m->codec = AMediaCodec_createDecoderByType(mime);
+    if (!m->codec)
+        die("media: AMediaCodec_createDeocderByType(%s) failed", mime);
+
+    ret = AMediaCodec_configure(m->codec, m->format, surface, /*crypto*/ NULL,
+            /*flags*/ 0);
+    if (ret)
+        die("media: AMediaCodec_configure failed: error=%d", ret);
+
+    AMediaCodecOnAsyncNotifyCallback codec_notify_cb = {
+            .onAsyncError = on_codec_error,
+            .onAsyncFormatChanged = on_codec_format_changed,
+            .onAsyncInputAvailable = on_codec_input_available,
+            .onAsyncOutputAvailable = on_codec_output_available,
+    };
+
+    ret = AMediaCodec_setAsyncNotifyCallback(m->codec, codec_notify_cb, m);
+    if (ret)
+        die("media: AMediaCodec_setAsyncNotifyCallback failed: error=%d", ret);
+
+    if (pthread_create(&m->thread, NULL, ru_media_thread, m))
+        abort();
+
+    return m;
+}
+
 void
 ru_media_free(RuMedia *m) {
     if (!m)
@@ -372,6 +458,7 @@ ru_media_free(RuMedia *m) {
     AMediaExtractor_delete(m->ex);
     AMediaFormat_delete(m->format);
     ru_chan_finish(&m->event_chan);
+    AAsset_close(m->asset);
     free(m);
 }
 
