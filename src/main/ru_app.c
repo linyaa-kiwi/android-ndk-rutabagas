@@ -65,9 +65,6 @@ get_arg(struct android_app *android, const char *name) {
 
 RuApp *
 ru_app_new(struct android_app *android) {
-    _cleanup_free_ char *media_src = get_arg(android, "mediaSrc");
-    if (!media_src)
-        die("cmdline missing `-e mediaSrc <path>`");
 
     RuRendUseExternalFormat use_ext_format = RU_REND_USE_EXTERNAL_FORMAT_AUTO;
     _cleanup_free_ char *use_ext_format_s = get_arg(android, "useVkExternalFormat");
@@ -97,14 +94,21 @@ ru_app_new(struct android_app *android) {
         die("bad value for useVkValidation: %s", use_validation_s);
     }
 
+    AAssetDir *asset_dir = AAssetManager_openDir(android->activity->assetManager, "");
+    const char *media_name = AAssetDir_getNextFileName(asset_dir);
+    if(media_name == NULL)
+        die("No media file in assets directory");
+
     let app = new0(RuApp);
     app->android = android;
     app->android->userData = app;
     app->android->onAppCmd = on_app_cmd;
-    app->media = ru_media_new(media_src);
+    app->media = ru_asset_media_new(android->activity->assetManager, media_name);
     app->rend = ru_rend_new(
         .use_validation = use_validation,
         .use_external_format = use_ext_format);
+
+    AAssetDir_close(asset_dir);
 
     return app;
 }

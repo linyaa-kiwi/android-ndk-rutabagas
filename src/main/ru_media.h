@@ -28,12 +28,14 @@
 #pragma once
 
 #include "util/attribs.h"
+#include <android/asset_manager.h>
 
 typedef struct AImage AImage;
 typedef struct AImageReader AImageReader;
 typedef struct RuMedia RuMedia;
 
 RuMedia *ru_media_new(const char *src_path) _malloc_ _must_use_result_;
+RuMedia *ru_asset_media_new(AAssetManager *asset_mgr, const char *src_path) _malloc_ _must_use_result_;
 
 // Implicitly calls ru_media_stop().
 void ru_media_free(RuMedia *m);

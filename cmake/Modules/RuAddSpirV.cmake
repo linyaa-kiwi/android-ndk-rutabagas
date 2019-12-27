@@ -35,6 +35,7 @@ if(CMAKE_VERSION VERSION_LESS "3.7")
 endif()
 
 find_program(GLSLC glslc REQUIRED
+    PATHS ${ANDROID_NDK}/shader-tools/${ANDROID_HOST_TAG}
     DOC "Path to glslc executable"
 )
 

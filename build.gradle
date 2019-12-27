@@ -33,6 +33,7 @@ android {
             manifest.srcFile 'AndroidManifest.xml'
             jni.srcDirs = ['.']
             jniLibs.srcDir "$ndkDirectory/sources/third_party/vulkan/src/build-android/jniLibs"
+            assets.srcDir "assets"
         }
     }
     externalNativeBuild {
@@ -42,5 +43,8 @@ android {
     }
     lintOptions {
         disable "AllowBackup", "GoogleAppIndexingWarning"
+    }
+    aaptOptions {
+        noCompress 'avi', 'mp4', 'flv'
     }
 }

@@ -2,7 +2,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.example.media_to_vk_ahb">
 
-    <uses-sdk android:minSdkVersion="28" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
 
     <!-- Set hasCode=false because this APK contains no Java code. -->
